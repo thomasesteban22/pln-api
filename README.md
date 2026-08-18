@@ -3,7 +3,7 @@
 Universidad Sergio Arboleda
 Escuela de Ciencias Exactas e Ingeniería
 Programa de Ciencias de la Computación e Inteligencia Artificial
-Asignatura: Procesamiento de Lenguaje Natural (PCIA5011)
+Asignatura: Procesamiento de Lenguaje Natural
 
 ---
 
