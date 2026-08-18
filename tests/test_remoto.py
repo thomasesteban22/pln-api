@@ -57,10 +57,41 @@ def test_servicio_disponible():
 
 
 def test_processed_remoto():
-    """El preprocesamiento debe lematizar y eliminar ruido."""
-    cuerpo = post("/processed", {"text": "<p>Los gatos corrían</p> 😀"})
+    """
+    El preprocesamiento debe lematizar y eliminar ruido.
+
+    El texto de prueba es una oracion completa de forma deliberada: el
+    lematizador de es_core_news_sm es sensible al contexto sintactico y
+    devuelve el lema invalido 'corer' cuando falta el complemento. Ver
+    test_lematizacion_depende_del_contexto.
+    """
+    cuerpo = post(
+        "/processed",
+        {"text": "<p>Los gatos corrían rápidamente por los tejados</p> 😀"},
+    )
     assert "<p>" not in cuerpo["limpieza"]["texto_limpio"]
+    assert "😀" not in cuerpo["limpieza"]["texto_limpio"]
     assert "correr" in cuerpo["transformacion"]["tokens_procesados"]
+
+
+def test_lematizacion_depende_del_contexto():
+    """
+    Documenta una limitacion del modelo es_core_news_sm.
+
+    La misma forma verbal produce lemas distintos segun el contexto: en una
+    oracion completa se obtiene 'correr', pero al recortar el complemento el
+    modelo devuelve 'corer', que no es una palabra valida del espanol. La
+    etiqueta VERB es correcta en ambos casos; el fallo esta en el componente
+    de lematizacion.
+    """
+    completo = post("/processed", {"text": "Los gatos corrían rápidamente por los tejados"})
+    recortado = post("/processed", {"text": "Los gatos corrían"})
+
+    assert "correr" in completo["transformacion"]["tokens_procesados"]
+    assert "correr" not in recortado["transformacion"]["tokens_procesados"], (
+        "Comportamiento del modelo cambiado: el caso degenerado ya no se "
+        "reproduce. Revisar si se actualizo la version del modelo."
+    )
 
 
 def test_dependency_remoto():
