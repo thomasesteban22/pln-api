@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.git/
+tests/
+*.md
+run_local.sh
+deploy_lambda.sh
