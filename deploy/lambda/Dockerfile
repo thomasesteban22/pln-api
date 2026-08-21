@@ -4,14 +4,6 @@
 # spaCy y su modelo superan. El despliegue como imagen de contenedor eleva ese
 # limite a 10 GB, por lo que no es una preferencia sino un requisito tecnico.
 #
-# Se usa una unica etapa y se instala en el site-packages estandar de la imagen,
-# que es el patron documentado por AWS. La alternativa multietapa con
-# "pip install --target /deps" seguida de "COPY --from=builder /deps" resulta
-# fragil: pip no siempre deposita en el directorio aislado las dependencias
-# transitivas que ya existen en el entorno de construccion, de modo que algunos
-# modulos (por ejemplo click, requerido por typer y por tanto por spaCy)
-# desaparecen de la imagen final y provocan un ModuleNotFoundError.
-#
 # Construccion desde la raiz del repositorio:
 #   docker build --platform linux/amd64 --provenance=false \
 #     -f deploy/lambda/Dockerfile -t pln-lab:latest .
@@ -22,7 +14,18 @@ FROM public.ecr.aws/lambda/python:3.12
 RUN dnf install -y gcc gcc-c++ && dnf clean all
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt mangum==0.19.0
+
+# --ignore-installed es imprescindible en esta imagen base.
+#
+# La imagen de Lambda trae parte de sus dependencias en /var/runtime, ruta que
+# forma parte del sys.path del runtime pero no del interprete durante la
+# construccion. pip las detecta como ya satisfechas y omite instalarlas en el
+# site-packages estandar, de modo que quedan registradas pero no son
+# importables. El caso concreto que rompe esta imagen es 'click', requerido por
+# typer y por tanto por spaCy: sin la bandera, "import spacy" falla con
+# ModuleNotFoundError: No module named 'click'.
+RUN pip install --no-cache-dir --ignore-installed \
+    -r /tmp/requirements.txt mangum==0.19.0
 
 # Logica funcional comun a ambas arquitecturas.
 COPY app ${LAMBDA_TASK_ROOT}/app
@@ -37,10 +40,14 @@ ENV SPACY_MODEL=es_core_news_sm \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Verificacion en tiempo de construccion: comprueba que el modelo y el handler
-# se importan correctamente. Si algo falta, la construccion falla aqui y no en
-# la primera invocacion en produccion.
-RUN python -c "import spacy, sklearn, mangum; spacy.load('es_core_news_sm'); print('modelo verificado')" \
+# Verificacion en tiempo de construccion. Comprueba de forma explicita cada
+# dependencia critica y el handler completo, de modo que cualquier modulo
+# ausente rompa la construccion en lugar de producir un error 500 durante la
+# evaluacion. Se informa la ruta de click para dejar constancia de que quedo
+# instalado en el site-packages y no solo registrado.
+RUN python -c "import click; print('click:', click.__file__)" \
+ && python -c "import spacy, sklearn, mangum, fastapi, pydantic; print('dependencias verificadas')" \
+ && python -c "import spacy; spacy.load('es_core_news_sm'); print('modelo verificado')" \
  && python -c "import sys; sys.path.insert(0, '${LAMBDA_TASK_ROOT}'); import handler; print('handler verificado')"
 
 CMD ["handler.handler"]
