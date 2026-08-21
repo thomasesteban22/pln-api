@@ -4,28 +4,25 @@
 # spaCy y su modelo superan. El despliegue como imagen de contenedor eleva ese
 # limite a 10 GB, por lo que no es una preferencia sino un requisito tecnico.
 #
+# Se usa una unica etapa y se instala en el site-packages estandar de la imagen,
+# que es el patron documentado por AWS. La alternativa multietapa con
+# "pip install --target /deps" seguida de "COPY --from=builder /deps" resulta
+# fragil: pip no siempre deposita en el directorio aislado las dependencias
+# transitivas que ya existen en el entorno de construccion, de modo que algunos
+# modulos (por ejemplo click, requerido por typer y por tanto por spaCy)
+# desaparecen de la imagen final y provocan un ModuleNotFoundError.
+#
 # Construccion desde la raiz del repositorio:
 #   docker build --platform linux/amd64 --provenance=false \
 #     -f deploy/lambda/Dockerfile -t pln-lab:latest .
 
-FROM public.ecr.aws/lambda/python:3.12 AS builder
+FROM public.ecr.aws/lambda/python:3.12
 
+# Compiladores necesarios para las dependencias nativas de spaCy y scikit-learn.
 RUN dnf install -y gcc gcc-c++ && dnf clean all
 
 COPY requirements.txt /tmp/requirements.txt
-
-# --ignore-installed es imprescindible. Sin esa bandera, pip considera
-# satisfechas las dependencias que ya existen en el site-packages de la imagen
-# base y NO las copia a /deps. La imagen final solo recibe /deps, de modo que
-# esos paquetes desaparecen y el contenedor falla en tiempo de ejecucion con un
-# ModuleNotFoundError (por ejemplo, 'click', que spaCy declara como dependencia
-# directa y que viene preinstalado en la imagen base de Lambda).
-RUN pip install --no-cache-dir --ignore-installed \
-    -r /tmp/requirements.txt mangum==0.19.0 --target /deps
-
-FROM public.ecr.aws/lambda/python:3.12
-
-COPY --from=builder /deps ${LAMBDA_TASK_ROOT}
+RUN pip install --no-cache-dir -r /tmp/requirements.txt mangum==0.19.0
 
 # Logica funcional comun a ambas arquitecturas.
 COPY app ${LAMBDA_TASK_ROOT}/app
@@ -40,8 +37,10 @@ ENV SPACY_MODEL=es_core_news_sm \
     PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
-# Verificacion en tiempo de construccion: si el modelo no quedo instalado, la
-# construccion falla aqui y no en la primera invocacion en produccion.
-RUN python -c "import spacy; spacy.load('es_core_news_sm'); print('modelo verificado')"
+# Verificacion en tiempo de construccion: comprueba que el modelo y el handler
+# se importan correctamente. Si algo falta, la construccion falla aqui y no en
+# la primera invocacion en produccion.
+RUN python -c "import spacy, sklearn, mangum; spacy.load('es_core_news_sm'); print('modelo verificado')" \
+ && python -c "import sys; sys.path.insert(0, '${LAMBDA_TASK_ROOT}'); import handler; print('handler verificado')"
 
 CMD ["handler.handler"]
