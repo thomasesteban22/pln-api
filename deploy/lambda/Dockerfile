@@ -13,7 +13,15 @@ FROM public.ecr.aws/lambda/python:3.12 AS builder
 RUN dnf install -y gcc gcc-c++ && dnf clean all
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt mangum==0.19.0 --target /deps
+
+# --ignore-installed es imprescindible. Sin esa bandera, pip considera
+# satisfechas las dependencias que ya existen en el site-packages de la imagen
+# base y NO las copia a /deps. La imagen final solo recibe /deps, de modo que
+# esos paquetes desaparecen y el contenedor falla en tiempo de ejecucion con un
+# ModuleNotFoundError (por ejemplo, 'click', que spaCy declara como dependencia
+# directa y que viene preinstalado en la imagen base de Lambda).
+RUN pip install --no-cache-dir --ignore-installed \
+    -r /tmp/requirements.txt mangum==0.19.0 --target /deps
 
 FROM public.ecr.aws/lambda/python:3.12
 
