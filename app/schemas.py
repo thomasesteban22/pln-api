@@ -1,153 +1,130 @@
 """
-Esquemas de entrada y salida de la API.
+Contrato de entrada de la API y reglas de validacion.
 
-Se usa Pydantic para validar las peticiones antes de que lleguen a la logica de
-negocio. Esto evita que texto vacio o parametros invalidos alcancen el pipeline
-de spaCy, y hace que FastAPI genere automaticamente la documentacion OpenAPI
-con ejemplos.
+La seccion 9 de la guia enumera los casos que quedan fuera del contrato:
+ausencia de campos obligatorios, valores null, tipos distintos de los
+declarados, listas vacias, elementos no string, textos vacios o compuestos
+unicamente por espacios, uso de batch en /visualize/dep y colecciones con menos
+de dos documentos en /vectorize.
+
+Todos estos casos deben producir una respuesta HTTP 4xx sin resultados
+parciales. La validacion se realiza en Pydantic, antes de que la peticion
+alcance el pipeline de spaCy, de modo que un lote con un solo elemento invalido
+se rechaza completo y no llega a procesarse ningun elemento.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import List, Union
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, StrictStr, field_validator
 
-MAX_LONGITUD_TEXTO = 100_000
-MAX_DOCUMENTOS = 500
+# Limites derivados del atributo de calidad "Capacidad" de la guia. Se fijan
+# holgadamente por encima de los minimos exigidos (25 documentos de 1.000
+# caracteres para limpieza, POS y NER; 10 documentos para vectorizacion).
+MAX_DOCUMENTOS = 100
+MAX_CARACTERES = 20_000
+MIN_DOCUMENTOS_VECTORIZAR = 2
 
 
-class OpcionesPreprocesamiento(BaseModel):
-    """Configuracion de las fases de limpieza y transformacion."""
-
-    remove_html: bool = True
-    remove_urls: bool = True
-    remove_emails: bool = True
-    remove_emojis: bool = True
-    remove_numbers: bool = False
-    remove_accents: bool = False
-    lowercase: bool = True
-    remove_stopwords: bool = True
-    remove_punctuation: bool = True
-    lemmatize: bool = True
-    allowed_pos: Optional[List[str]] = Field(
-        default=None,
-        description="Si se especifica, conserva unicamente estas categorias "
-        "gramaticales. Ejemplo: ['NOUN', 'VERB', 'ADJ'].",
-    )
+def _validar_texto(valor: str, etiqueta: str = "texto") -> str:
+    """Rechaza cadenas vacias o compuestas unicamente por espacios."""
+    if not valor.strip():
+        raise ValueError(
+            f"El {etiqueta} no puede estar vacio ni contener solo espacios."
+        )
+    if len(valor) > MAX_CARACTERES:
+        raise ValueError(
+            f"El {etiqueta} excede el limite de {MAX_CARACTERES} caracteres."
+        )
+    return valor
 
 
 class PeticionTexto(BaseModel):
-    """Peticion con un unico texto a analizar."""
+    """
+    Peticion para las capacidades que admiten texto individual o por lotes.
 
-    text: str = Field(..., description="Texto a procesar.")
-    model: Optional[str] = Field(
-        default=None,
-        description="Modelo de spaCy a utilizar. Por defecto es_core_news_sm.",
-    )
+    El tipo StrictStr es deliberado: sin el, Pydantic convertiria valores
+    numericos o booleanos a cadena, aceptando entradas que el contrato declara
+    invalidas por ser de un tipo distinto al declarado.
+    """
+
+    text: Union[StrictStr, List[StrictStr]]
 
     @field_validator("text")
     @classmethod
-    def validar_texto(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("El campo 'text' no puede estar vacio.")
-        if len(v) > MAX_LONGITUD_TEXTO:
+    def validar(cls, valor):
+        if isinstance(valor, str):
+            return _validar_texto(valor)
+
+        if len(valor) == 0:
+            raise ValueError("La lista de textos no puede estar vacia.")
+        if len(valor) > MAX_DOCUMENTOS:
             raise ValueError(
-                f"El texto excede el limite de {MAX_LONGITUD_TEXTO} caracteres."
+                f"El lote excede el limite de {MAX_DOCUMENTOS} documentos."
             )
-        return v
+        for i, elemento in enumerate(valor):
+            _validar_texto(elemento, f"texto en la posicion {i}")
+        return valor
+
+    def como_lista(self) -> List[str]:
+        """Normaliza la entrada a lista para unificar el procesamiento interno."""
+        return [self.text] if isinstance(self.text, str) else list(self.text)
 
     model_config = {
         "json_schema_extra": {
-            "example": {
-                "text": "Juan Pérez viajó a Bogotá el 5 de marzo para reunirse "
-                "con Ecopetrol. Más info en https://ejemplo.com"
-            }
+            "example": {"text": "Juan Pérez viajó a Bogotá con Ecopetrol."}
         }
     }
 
 
-class PeticionPreprocesamiento(PeticionTexto):
-    """Peticion de preprocesamiento con opciones configurables."""
+class PeticionTextoUnico(BaseModel):
+    """
+    Peticion para /visualize/dep, que procesa un unico documento por solicitud.
 
-    options: OpcionesPreprocesamiento = Field(
-        default_factory=OpcionesPreprocesamiento
-    )
+    El campo se declara como StrictStr y no admite lista: el uso de batch en
+    este endpoint esta explicitamente fuera del contrato.
+    """
+
+    text: StrictStr
+
+    @field_validator("text")
+    @classmethod
+    def validar(cls, valor: str) -> str:
+        return _validar_texto(valor)
+
+    model_config = {
+        "json_schema_extra": {"example": {"text": "El gato come pescado."}}
+    }
 
 
-class PeticionCodificacion(BaseModel):
-    """Peticion de codificacion sobre una coleccion de documentos."""
+class PeticionVectorizar(BaseModel):
+    """Peticion de vectorizacion, que requiere al menos dos documentos."""
 
-    documents: List[str] = Field(
-        ..., description="Coleccion de documentos a codificar."
-    )
-    method: str = Field(
-        default="tfidf",
-        description="Metodo de codificacion: one_hot, bow o tfidf.",
-    )
-    ngram_min: int = Field(default=1, ge=1, le=5)
-    ngram_max: int = Field(default=1, ge=1, le=5)
-    max_features: Optional[int] = Field(default=None, ge=1)
-    preprocess: bool = Field(
-        default=False,
-        description="Si es true, aplica limpieza y lematizacion a cada "
-        "documento antes de codificar.",
-    )
-    compare_all: bool = Field(
-        default=False,
-        description="Si es true, ignora 'method' y devuelve las tres "
-        "codificaciones para comparacion.",
-    )
+    documents: List[StrictStr]
 
     @field_validator("documents")
     @classmethod
-    def validar_documentos(cls, v: List[str]) -> List[str]:
-        if not v:
-            raise ValueError("Debe proporcionar al menos un documento.")
-        if len(v) > MAX_DOCUMENTOS:
+    def validar(cls, valor: List[str]) -> List[str]:
+        if len(valor) < MIN_DOCUMENTOS_VECTORIZAR:
             raise ValueError(
-                f"El numero de documentos excede el limite de {MAX_DOCUMENTOS}."
+                f"Se requieren al menos {MIN_DOCUMENTOS_VECTORIZAR} documentos."
             )
-        if all(not d.strip() for d in v):
-            raise ValueError("Todos los documentos estan vacios.")
-        return v
-
-    @field_validator("method")
-    @classmethod
-    def validar_metodo(cls, v: str) -> str:
-        validos = {"one_hot", "bow", "tfidf"}
-        if v not in validos:
+        if len(valor) > MAX_DOCUMENTOS:
             raise ValueError(
-                f"Metodo invalido: '{v}'. Valores validos: {', '.join(sorted(validos))}."
+                f"La coleccion excede el limite de {MAX_DOCUMENTOS} documentos."
             )
-        return v
+        for i, documento in enumerate(valor):
+            _validar_texto(documento, f"documento en la posicion {i}")
+        return valor
 
     model_config = {
         "json_schema_extra": {
             "example": {
                 "documents": [
-                    "gato gato gato comer pescado",
-                    "juan comer bogota",
-                    "caballo comer rapido",
-                ],
-                "method": "tfidf",
+                    "El gato come pescado y el gato duerme.",
+                    "Juan come en Bogotá.",
+                ]
             }
         }
     }
-
-
-class RespuestaSalud(BaseModel):
-    """Estado del servicio."""
-
-    status: str
-    modelo: str
-    modelo_cargado: bool
-    version_spacy: str
-    entorno: str
-
-
-class RespuestaError(BaseModel):
-    """Formato uniforme de error."""
-
-    detail: str
-    tipo: Optional[str] = None

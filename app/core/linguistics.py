@@ -1,148 +1,80 @@
 """
-Analisis linguistico: dependencias sintacticas y entidades nombradas.
+Analisis linguistico: POS, entidades nombradas y visualizacion de dependencias.
 
-A diferencia del preprocesamiento, estas funciones operan sobre el texto crudo.
-Aplicar limpieza agresiva antes del analisis sintactico o del NER degrada los
-resultados: el parser depende de la puntuacion para delimitar clausulas y el
-reconocedor de entidades usa las mayusculas como senal principal para detectar
-nombres propios.
+Estas capacidades operan sobre el texto ORIGINAL y no sobre el texto limpio.
+La razon es doble y esta impuesta por el propio contrato:
+
+  - Los indices de las entidades deben referirse al texto original, con start
+    inclusivo y end exclusivo. Limpiar el texto destruiria esa correspondencia.
+  - El reconocedor de entidades usa la capitalizacion como senal principal y el
+    analizador de dependencias usa la puntuacion para delimitar clausulas.
+    Aplicar la limpieza antes degradaria ambos resultados de forma severa.
 """
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
+
+from spacy import displacy
 
 from app.core.pipeline import get_nlp
 
-# Descripciones legibles de las etiquetas de entidad del modelo espanol.
-ETIQUETAS_ENTIDAD = {
-    "PER": "Persona",
-    "PERSON": "Persona",
-    "ORG": "Organizacion",
-    "LOC": "Lugar",
-    "GPE": "Entidad geopolitica",
-    "MISC": "Miscelanea",
-    "DATE": "Fecha",
-    "TIME": "Hora",
-    "MONEY": "Cantidad monetaria",
-    "PERCENT": "Porcentaje",
-}
 
-
-def analyze_dependencies(text: str, model: Optional[str] = None) -> Dict[str, Any]:
+def analizar_pos(textos: List[str]) -> List[Dict[str, Any]]:
     """
-    Devuelve el arbol de dependencias sintacticas del texto.
+    Devuelve tokens con texto, categoria gramatical universal y lema.
 
-    Para cada token se reporta su relacion de dependencia (dep_), su nucleo
-    sintactico (head) y sus hijos, junto con la etiqueta morfosintactica. Se
-    identifica ademas la raiz de cada oracion, que es el nodo del cual cuelga
-    toda la estructura.
+    La posicion i del resultado corresponde al documento i de la entrada y el
+    orden de los tokens dentro de cada documento se conserva.
     """
-    nlp = get_nlp(model)
-    doc = nlp(text)
+    nlp = get_nlp()
+    resultados: List[Dict[str, Any]] = []
 
-    tokens: List[Dict[str, Any]] = []
-    for token in doc:
-        if token.is_space:
-            continue
-        tokens.append(
+    for doc in nlp.pipe(textos):
+        tokens = [
+            {"text": token.text, "pos": token.pos_, "lemma": token.lemma_}
+            for token in doc
+            if not token.is_space
+        ]
+        resultados.append({"tokens": tokens})
+
+    return resultados
+
+
+def analizar_ner(textos: List[str]) -> List[Dict[str, Any]]:
+    """
+    Detecta entidades nombradas con su texto, tipo y posicion.
+
+    Los offsets start y end se toman directamente de spaCy, que los expresa en
+    caracteres sobre el texto original con start inclusivo y end exclusivo,
+    exactamente como exige el contrato.
+    """
+    nlp = get_nlp()
+    resultados: List[Dict[str, Any]] = []
+
+    for doc in nlp.pipe(textos):
+        entidades = [
             {
-                "indice": token.i,
-                "texto": token.text,
-                "lema": token.lemma_,
-                "pos": token.pos_,
-                "tag": token.tag_,
-                "dependencia": token.dep_,
-                "explicacion_dependencia": spacy_explain(token.dep_),
-                "nucleo": token.head.text,
-                "indice_nucleo": token.head.i,
-                "hijos": [hijo.text for hijo in token.children],
-                "es_raiz": token.dep_ == "ROOT",
+                "text": ent.text,
+                "label": ent.label_,
+                "start": ent.start_char,
+                "end": ent.end_char,
             }
-        )
+            for ent in doc.ents
+        ]
+        resultados.append({"entities": entidades})
 
-    oraciones = [
-        {
-            "texto": sent.text.strip(),
-            "raiz": sent.root.text,
-            "pos_raiz": sent.root.pos_,
-        }
-        for sent in doc.sents
-    ]
-
-    return {
-        "texto": text,
-        "tokens": tokens,
-        "oraciones": oraciones,
-        "num_tokens": len(tokens),
-        "num_oraciones": len(oraciones),
-    }
+    return resultados
 
 
-def spacy_explain(label: str) -> str:
+def visualizar_dependencias(texto: str) -> str:
     """
-    Traduce una etiqueta de spaCy a su descripcion legible.
+    Genera un documento HTML con la representacion SVG del analisis sintactico.
 
-    Se envuelve en una funcion propia porque spacy.explain devuelve None para
-    etiquetas desconocidas, lo que ensucia la respuesta JSON.
+    Se usa displacy.render con page=True para obtener un documento HTML
+    completo y valido que contiene el SVG, tal como exige la guia. Se procesa
+    un unico documento por solicitud.
     """
-    import spacy
-
-    return spacy.explain(label) or label
-
-
-def analyze_entities(text: str, model: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Reconoce entidades nombradas y devuelve el texto anotado.
-
-    Ademas de la lista estructurada de entidades con sus offsets, se construye
-    una version del texto con las etiquetas insertadas en linea, en el formato
-    'Bogota [LOC]'. La insercion se hace recorriendo las entidades en orden
-    inverso para que los offsets de las anteriores no se invaliden.
-    """
-    nlp = get_nlp(model)
-    doc = nlp(text)
-
-    entidades: List[Dict[str, Any]] = []
-    for ent in doc.ents:
-        entidades.append(
-            {
-                "texto": ent.text,
-                "etiqueta": ent.label_,
-                "descripcion": ETIQUETAS_ENTIDAD.get(
-                    ent.label_, spacy_explain(ent.label_)
-                ),
-                "inicio": ent.start_char,
-                "fin": ent.end_char,
-                "token_inicio": ent.start,
-                "token_fin": ent.end,
-            }
-        )
-
-    texto_etiquetado = text
-    for ent in reversed(doc.ents):
-        texto_etiquetado = (
-            texto_etiquetado[: ent.end_char]
-            + f" [{ent.label_}]"
-            + texto_etiquetado[ent.end_char :]
-        )
-
-    conteo: Dict[str, int] = {}
-    for ent in entidades:
-        conteo[ent["etiqueta"]] = conteo.get(ent["etiqueta"], 0) + 1
-
-    # Esquema BIO, util si posteriormente se entrena un modelo de secuencias.
-    bio = [
-        {"token": token.text, "bio": f"{token.ent_iob_}-{token.ent_type_}" if token.ent_type_ else "O"}
-        for token in doc
-        if not token.is_space
-    ]
-
-    return {
-        "texto": text,
-        "texto_etiquetado": texto_etiquetado,
-        "entidades": entidades,
-        "conteo_por_etiqueta": conteo,
-        "num_entidades": len(entidades),
-        "esquema_bio": bio,
-    }
+    nlp = get_nlp()
+    doc = nlp(texto)
+    return displacy.render(doc, style="dep", page=True, options={"compact": True})
