@@ -15,7 +15,9 @@ natural sobre texto en español, implementado con FastAPI y spaCy
 
 La misma solución se despliega en dos arquitecturas dentro de AWS Academy:
 
-1. **EC2 / Cloud9** — despliegue persistente servido por Uvicorn.
+1. **EC2** — despliegue persistente servido por Uvicorn bajo un servicio de
+   systemd, de modo que arranca automáticamente tras un reinicio y se reinicia
+   si el proceso muere.
 2. **AWS Lambda** — despliegue serverless mediante imagen de contenedor,
    expuesto públicamente por Lambda Function URL.
 
@@ -30,10 +32,18 @@ del servicio.
 
 | Arquitectura | URL |
 |---|---|
-| EC2 / Cloud9 | `http://<IP-PÚBLICA>:8000` |
-| Lambda | `https://<ID>.lambda-url.us-east-1.on.aws` |
+| EC2 | http://184.73.114.15:8000 |
+| Lambda | https://l76kxil2v3ssz6zvtdcar4rpl40symih.lambda-url.us-east-1.on.aws |
 
-> Completar con las URLs reales antes de la entrega.
+Comprobación rápida de disponibilidad:
+
+```bash
+curl http://184.73.114.15:8000/health
+curl https://l76kxil2v3ssz6zvtdcar4rpl40symih.lambda-url.us-east-1.on.aws/health
+```
+
+Ambas responden `{"status":"ok","model":"es_core_news_sm","model_loaded":true,...}`,
+diferenciándose únicamente en el campo `environment` (`ec2` o `lambda`).
 
 ---
 
@@ -143,15 +153,44 @@ arranque en frío.
 
 ## 6. Despliegue
 
-### EC2 / Cloud9
+### EC2
+
+La instancia se aprovisiona de forma automática en el primer arranque mediante
+`deploy/ec2/user-data.sh`, que se pega en el campo *Datos de usuario* del
+asistente de lanzamiento. El script instala las dependencias del sistema, clona
+el repositorio, crea el entorno virtual y registra el microservicio como
+servicio de systemd.
+
+Configuración de la instancia:
+
+| Parámetro | Valor | Justificación |
+|-----------|-------|---------------|
+| AMI | Ubuntu Server **24.04 LTS** | Trae Python 3.12; ver la advertencia siguiente |
+| Tipo | `t3.small` o superior | Con 1 GB de RAM la instalación de spaCy y scikit-learn se queda sin memoria |
+| Almacenamiento | 30 GB | Las capas de la imagen de contenedor no caben en los 8 GB por defecto |
+| Perfil de IAM | `LabInstanceProfile` | Necesario para AWS CLI y Session Manager |
+| Puertos | 22 y 8000 desde `0.0.0.0/0` | La guía exige acceso desde una red externa |
+
+**Advertencia sobre la versión de Ubuntu.** `spacy==3.8.3` declara
+`Requires-Python <3.13`. Ubuntu 26.04 trae Python 3.14, de modo que pip descarta
+todas las versiones compatibles y la instalación falla con *No matching
+distribution found*. Fijar la versión de la librería no basta: la versión del
+intérprete del sistema base es la que decide. El despliegue en Lambda no
+presenta este problema porque la imagen fija `python:3.12` de forma explícita.
+
+Para operar el servicio manualmente:
+
+```bash
+sudo systemctl status pln-api
+sudo systemctl restart pln-api
+sudo journalctl -u pln-api -n 50
+```
+
+Alternativa sin systemd, útil para desarrollo:
 
 ```bash
 ./deploy/ec2/run.sh
 ```
-
-Crea el entorno virtual, instala dependencias y levanta Uvicorn con varios
-workers (necesario para atender solicitudes concurrentes). Para acceso externo,
-abrir el puerto 8000 en el Security Group de la instancia.
 
 ### Lambda
 
@@ -176,36 +215,100 @@ Detalles que suelen fallar y que el script ya contempla:
   debajo de 1536 MB la carga de spaCy se vuelve lenta y arriesga el timeout.
 - **`/tmp` es el único punto escribible** en Lambda; el Dockerfile redirige allí
   los directorios de caché.
+- **`click` debe declararse explícitamente.** `spacy==3.8.3` ejecuta
+  `from click import NoSuchOption` pero no declara `click` en sus metadatos:
+  históricamente lo recibía de forma transitiva a través de `typer`. Las
+  versiones actuales de `typer` (0.27) y `typer-slim` (0.24) dejaron de
+  declararlo, de modo que pip no lo instala y la imagen falla al importar spaCy.
+  El despliegue sobre EC2 no lo manifiesta porque allí `uvicorn` lo arrastra.
+- **`buildx` en Ubuntu.** El paquete `docker.io` de Ubuntu usa el constructor
+  antiguo, que no reconoce `--provenance`. Se resuelve con
+  `sudo apt-get install -y docker-buildx`.
 
 ---
 
 ## 7. Pruebas
 
+### Resultados obtenidos
+
+| Suite | Contra qué se ejecutó | Resultado |
+|---|---|---|
+| `test_contrato.py` | Aplicación en memoria | **49 passed** |
+| `test_contrato.py` | EC2 (`http://184.73.114.15:8000`) | **49 passed** |
+| `test_contrato.py` | Lambda (Function URL) | **49 passed** |
+| `test_paridad.py` | Ambos despliegues simultáneamente | **17 passed** |
+
+### Cómo reproducirlos
+
 ```bash
-# Aplicación en memoria
-pytest tests/test_contrato.py -v
+cd /home/ubuntu/pln-api
+source .venv/bin/activate
 
-# Contra un despliegue concreto
-API_URL=http://<ip>:8000 pytest tests/test_contrato.py -v
-API_URL=https://<id>.lambda-url.us-east-1.on.aws pytest tests/test_contrato.py -v
+# 1. Contrato sobre la aplicación en memoria
+pytest tests/test_contrato.py -q
 
-# Paridad entre ambos despliegues
-EC2_URL=http://<ip>:8000 \
-LAMBDA_URL=https://<id>.lambda-url.us-east-1.on.aws \
-pytest tests/test_paridad.py -v
+# 2. Contrato contra el despliegue en EC2
+API_URL=http://184.73.114.15:8000 pytest tests/test_contrato.py -q
+
+# 3. Contrato contra el despliegue en Lambda
+API_URL=https://l76kxil2v3ssz6zvtdcar4rpl40symih.lambda-url.us-east-1.on.aws \
+  pytest tests/test_contrato.py -q
+
+# 4. Paridad entre ambos despliegues
+EC2_URL=http://184.73.114.15:8000 \
+LAMBDA_URL=https://l76kxil2v3ssz6zvtdcar4rpl40symih.lambda-url.us-east-1.on.aws \
+  pytest tests/test_paridad.py -v
 ```
 
-`test_contrato.py` contiene 47 pruebas de caja negra que cubren las cinco
-capacidades, el procesamiento por lotes y su orden, las trece formas de entrada
-inválida enumeradas en la guía, la consistencia entre solicitudes, la capacidad
-mínima (25 documentos para limpieza/POS/NER, 10 para vectorización), cinco
-solicitudes concurrentes e independientes, y el límite de 10 segundos por
-solicitud.
+### Cobertura
+
+`test_contrato.py` contiene 49 pruebas de caja negra. El mismo archivo sirve
+para los tres escenarios: si la variable `API_URL` está definida se usan
+peticiones HTTP reales; si no, se ejercita la aplicación en memoria. Cubre:
+
+| Área | Qué se verifica |
+|---|---|
+| Limpieza | Minúsculas, eliminación de stop words y puntuación, conservación de tildes, `ñ` y dígitos, normalización de espacios, la puntuación como separador, lotes en orden |
+| POS | Estructura `text`/`pos`/`lemma`, orden de tokens, lematización, correspondencia en lotes |
+| NER | Estructura de entidades, offsets exactos sobre el texto original, texto sin entidades, correspondencia en lotes |
+| Dependencias | Respuesta `text/html` con SVG, rechazo de lotes |
+| Vectorización | Vocabulario lexicográfico, dimensiones `N × |V|`, frecuencia absoluta en BoW, One-Hot como lista de matrices con una fila por ocurrencia, fórmula del IDF término a término, ausencia de normalización, redondeo a 4 decimales, orden de filas, vocabulario vacío |
+| Entradas inválidas | Las 13 formas enumeradas en la sección 9 de la guía, más el rechazo completo de un lote con un elemento inválido |
+| Atributos de calidad | Consistencia entre solicitudes, 25 documentos para limpieza/POS/NER, 10 para vectorización, 5 solicitudes concurrentes e independientes, límite de 10 segundos por solicitud |
 
 `test_paridad.py` envía las mismas peticiones a ambos despliegues y compara las
-respuestas. Incluye una comprobación de que las dos URLs corresponden
-efectivamente a arquitecturas distintas, para evitar el falso positivo de
-apuntar ambas variables al mismo servicio.
+respuestas completas, incluidas las entradas inválidas. Incluye una
+comprobación de que las dos URLs corresponden efectivamente a arquitecturas
+distintas (`environment` igual a `ec2` y a `lambda`), para descartar el falso
+positivo de apuntar ambas variables al mismo servicio.
+
+### Demostración manual
+
+```bash
+API=http://184.73.114.15:8000
+
+curl -X POST $API/api/v1/clean -H "Content-Type: application/json" \
+  -d '{"text": "El gato come pescado."}'
+
+curl -X POST $API/api/v1/clean -H "Content-Type: application/json" \
+  -d '{"text": ["Compré 25 kilos de ñame.", "casa,perro. gato;pez"]}'
+
+curl -X POST $API/api/v1/pos -H "Content-Type: application/json" \
+  -d '{"text": "Los gatos corrían rápidamente por los tejados"}'
+
+curl -X POST $API/api/v1/ner -H "Content-Type: application/json" \
+  -d '{"text": "Juan Pérez viajó a Bogotá con Ecopetrol."}'
+
+curl -X POST $API/api/v1/visualize/dep -H "Content-Type: application/json" \
+  -d '{"text": "El gato come pescado."}'
+
+curl -X POST $API/api/v1/vectorize -H "Content-Type: application/json" \
+  -d '{"documents": ["El gato come pescado y el gato duerme.", "Juan come en Bogotá."]}'
+
+# Entrada inválida: debe responder 4xx sin resultados parciales
+curl -i -X POST $API/api/v1/clean -H "Content-Type: application/json" \
+  -d '{"text": ["texto valido", "   "]}'
+```
 
 ---
 
@@ -270,11 +373,26 @@ en contenedor y diagnóstico de errores de infraestructura en AWS.
 
 5. **Corrección de recomendaciones incorrectas.** Durante el desarrollo se
    descartaron por comprobación empírica varias hipótesis erróneas sugeridas
-   inicialmente por la herramienta. En particular, un error 403 en la Function
-   URL se atribuyó primero a una restricción de la cuenta de AWS Academy; la
-   consulta a la documentación oficial de AWS reveló que la causa real era la
-   ausencia del permiso `lambda:InvokeFunction`, requerido desde octubre de 2025
-   además de `lambda:InvokeFunctionUrl`.
+   inicialmente por la herramienta. Los tres casos más relevantes:
+
+   - Un error **403** en la Function URL se atribuyó primero a una restricción
+     de la cuenta de AWS Academy. La consulta a la documentación oficial reveló
+     que la causa real era la ausencia del permiso `lambda:InvokeFunction`,
+     exigido desde octubre de 2025 además de `lambda:InvokeFunctionUrl`.
+   - Un `ModuleNotFoundError: No module named 'click'` en la construcción de la
+     imagen se atribuyó sucesivamente al comportamiento de `pip --target` y a
+     las rutas de `/var/runtime`. Ambas hipótesis se descartaron ejecutando la
+     resolución de dependencias con `pip install --dry-run --report`, que
+     mostró los 41 paquetes resueltos sin `click` entre ellos, y consultando en
+     PyPI los metadatos de `spacy`, `typer` y `typer-slim`.
+   - Una propuesta de desactivar el apagado automático de Cloud9 escribiendo
+     `SHUTDOWN_TIMEOUT=0` se descartó tras leer el script
+     `/opt/c9/stop-if-inactive.sh`: el valor `0` habría ejecutado
+     `shutdown -h 0`, apagando la instancia de inmediato.
+
+   El criterio adoptado tras estos casos fue no aceptar diagnósticos por
+   plausibilidad, sino obtener la evidencia que los confirma o los refuta antes
+   de aplicar cualquier corrección.
 
 No se compartieron con la herramienta contraseñas, claves de acceso, tokens,
 credenciales ni información sensible de AWS Academy. El repositorio no contiene
