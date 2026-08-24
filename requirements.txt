@@ -3,3 +3,16 @@ pydantic==2.10.4
 spacy==3.8.3
 scikit-learn==1.6.0
 es-core-news-sm @ https://github.com/explosion/spacy-models/releases/download/es_core_news_sm-3.8.0/es_core_news_sm-3.8.0-py3-none-any.whl
+
+# Dependencia no declarada de spaCy.
+#
+# spacy/cli/_util.py ejecuta "from click import NoSuchOption", pero spacy 3.8.3
+# no declara click en sus metadatos: historicamente lo recibia de forma
+# transitiva a traves de typer. Las versiones actuales de typer (0.27) y
+# typer-slim (0.24) ya no lo declaran, de modo que click deja de instalarse y
+# "import spacy" falla con ModuleNotFoundError.
+#
+# El fallo no se manifiesta en el despliegue sobre EC2 porque alli uvicorn
+# (declarado en requirements-dev.txt) arrastra click; en la imagen de Lambda,
+# que no incluye uvicorn, si aparece. Se declara aqui de forma explicita.
+click>=8.1.7,<9

@@ -15,15 +15,14 @@ RUN dnf install -y gcc gcc-c++ && dnf clean all
 
 COPY requirements.txt /tmp/requirements.txt
 
-# --ignore-installed es imprescindible en esta imagen base.
+# --ignore-installed evita que pip omita paquetes que la imagen base registra
+# como instalados en rutas ajenas al site-packages del interprete de
+# construccion, garantizando que todas las dependencias queden fisicamente
+# presentes en la imagen final.
 #
-# La imagen de Lambda trae parte de sus dependencias en /var/runtime, ruta que
-# forma parte del sys.path del runtime pero no del interprete durante la
-# construccion. pip las detecta como ya satisfechas y omite instalarlas en el
-# site-packages estandar, de modo que quedan registradas pero no son
-# importables. El caso concreto que rompe esta imagen es 'click', requerido por
-# typer y por tanto por spaCy: sin la bandera, "import spacy" falla con
-# ModuleNotFoundError: No module named 'click'.
+# Nota sobre click: spaCy 3.8.3 lo importa pero no lo declara en sus metadatos,
+# y las versiones actuales de typer ya no lo arrastran. Por eso figura como
+# dependencia explicita en requirements.txt.
 RUN pip install --no-cache-dir --ignore-installed \
     -r /tmp/requirements.txt mangum==0.19.0
 
