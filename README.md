@@ -32,7 +32,7 @@ del servicio.
 
 | Arquitectura | URL |
 |---|---|
-| EC2 | http://184.73.114.15:8000 |
+| EC2 | http://100.55.30.215:8000 |
 | Lambda | https://l76kxil2v3ssz6zvtdcar4rpl40symih.lambda-url.us-east-1.on.aws |
 
 Comprobación rápida de disponibilidad:
